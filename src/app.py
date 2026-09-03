@@ -235,7 +235,11 @@ def _(
     def render_one(name):
         if name == "Altair":
             chart = make_altair_compare(view)
-            return mo.ui.altair_chart(chart)
+            # DO NOT USE: mo.ui.altair_chart(chart).
+            # That appears to serialize the whole set of series
+            # making it way too big.
+            # We lose click interactivity in this context.
+            return mo.as_html(chart)
         if name == "Plotly":
             chart = make_plotly_compare(view)
             return mo.ui.plotly(chart)
