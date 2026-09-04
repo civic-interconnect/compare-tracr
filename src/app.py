@@ -6,8 +6,9 @@ multiple geographies using NIST Tracking Community Resilience (TraCR) data.
 It is also a teaching template: re-point s00_nist_tracr_adapter.py at a
 different dataset, and the rest of the pipeline and renderers keep working.
 
-PLAN CELLS
-1. Imports
+PLAN CELLS FIRST
+
+1. Imports (always first, so the notebook is self-contained)
 2. Opening title and introduction (Markdown)
 3. Load and process the data
 4. Controls: indicator, renderer, mode
@@ -15,16 +16,60 @@ PLAN CELLS
 6. Build the comparison result and renderer-facing view
 7. Render: one chart, or all stacked for comparison
 8. Closing (Markdown)
+
+HOW MARIMO NOTEBOOKS WORK
+
+Each cell is a FUNCTION.
+The return value of one cell can be passed as an argument to another cell.
+We never call the functions, so they don't need names other than `_` (underscore).
+(You can give them names if you want, but the notebook engine ignores them.)
+
+The notebook is REACTIVE: when a cell's code or inputs change,
+the notebook engine reruns that cell and every cell that depends on it.
+
+The notebook is always CONSISTENT with outputs reflecting current inputs.
+
+The first cell imports all dependencies, so the notebook is SELF-CONTAINED.
+
+All later cells include their dependencies in their argument list.
+Some other cells return values that can be used in other cells.
+A cell displays the value of its last expression.
+
+A cell whose last line is an assignment or a bare return
+(like data and view cells) displays nothing;
+only markdown, control, and render cells are meant to show.
+
+RULE: Each variable must be defined in exactly one cell.
+Defining the same name in two cells is a marimo error.
+
+INPUT WIDGETS/CONTROLS: A cell that builds an input widget
+resets that widget to its default every time the cell reruns.
+marimo reruns a cell whenever any argument in its signature changes.
+So a widget-building cell must depend only on what genuinely determines its options.
 """
+
+# === ONLY THIS AT THE TOP OF THE FILE ===
 
 import marimo
 
 __generated_with_marimo_version__ = "0.24.0"
 app = marimo.App(width="medium")
 
+# === FIRST CELL IMPORTS AND RETURNS DEPS TO MAKE IT SELF-CONTAINED ===
+
 
 @app.cell
 async def _():
+    """Import every dependency and hand them to the rest of the notebook.
+
+    This cell has no arguments: it is the root of the dependency graph.
+
+    It returns each import so later cells can name them as parameters.
+    The micropip block installs plotly and pyarrow only under WASM (emscripten),
+    used when running in GitHub Pages or other browsers
+    where they are not preinstalled.
+    Running locally, they are available in the project Python environment.
+    """
     import sys
 
     import altair as alt
@@ -74,6 +119,9 @@ async def _():
     )
 
 
+# ===  TYPICALLY START WITH A MARKDOWN TITLE AND OPENING ===
+
+
 @app.cell
 def _(mo):
     mo.md(
@@ -88,12 +136,27 @@ def _(mo):
           indicator.
         - Choose one **renderer**, or switch to **Compare all** to see the same
           view rendered differently.
+        - NOTE: Changing the indicator will reset the selected geographies.
+          Improved behavior would require more advanced state management.
         """
     )
 
 
+# ===  LOAD AND PROCESS THE DATA ===
+
+
 @app.cell
 def _(load_raw, mo, process):
+    """Load the TraCR data and return the processed frame.
+
+    Depends on the adapter (`load_raw`), the processor (`process`),
+    and `mo` for `notebook_location()`, which resolves the three CSVs under public/
+    both locally and in the exported WASM build for GitHub Pages.
+    Reruns only when those change,
+    so the expensive load does not repeat when the user touches a control.
+
+    Returns `processed` for every downstream cell.
+    """
     tracr_path = mo.notebook_location() / "public" / "TraCR_v1_database.csv"
 
     metadata_path = (
@@ -113,8 +176,25 @@ def _(load_raw, mo, process):
     return (processed,)
 
 
+# ===  CONTROLS: SELECT INDICATOR, RENDERER, AND MODE ===
+
+
 @app.cell
 def _(list_indicators, mo, processed):
+    """Build the indicator, renderer, and mode controls.
+
+    Depends on `processed` (to list indicators) and `mo`.
+    It deliberately does NOT depend on `indicator`, `renderer`, or `mode` themselves.
+    This cell creates them, so nothing the user toggles reruns it, and the three
+    widgets never rebuild or reset once made.
+
+    Keeping renderer and mode here (rather than in the geography cell below) is
+    intentional: it keeps them out of that cell's argument list, so toggling
+    them cannot rerun the geography cell and snap the selection back to its
+    default.
+
+    Returns the three control widgets.
+    """
     indicators = list_indicators(processed)
 
     indicator = mo.ui.dropdown(
@@ -153,6 +233,9 @@ def _(list_indicators, mo, processed):
     return indicator, mode, renderer
 
 
+# ===  CONTROLS: SELECT GEOGRAPHY ===
+
+
 @app.cell
 def _(
     indicator,
@@ -160,9 +243,27 @@ def _(
     MAX_COMPARISON_GEOGRAPHIES,
     mo,
     processed,
-    renderer,
 ):
+    """Build the geography multiselect, scoped to the selected indicator.
 
+    Depends ONLY on `indicator` (plus data helpers and the cap) on purpose.
+    Different indicators cover different geographies, so the list must rebuild
+    when the indicator changes.
+    Rebuilding resets the selection to the default three.
+
+    NOTE: This resets the selected geographies whenever the indicator changes.
+    Preserving them across an indicator change might mean holding
+    selections in `mo.state` and re-seeding the rebuilt widget from it.
+    That is more state management than this template takes on and is left
+    as a potential improvement.
+
+    Do NOT add `renderer` or `mode` to this cell's arguments. This cell builds
+    a widget, and a widget-building cell resets to its default every time it
+    reruns; adding a control the user toggles would rerun this cell on every
+    toggle and discard the user's chosen geographies.
+
+    Returns the `geographies` widget.
+    """
     available_geographies = list_geographies_for_indicator(
         processed,
         indicator_id=indicator.value,
@@ -191,6 +292,9 @@ def _(
     return (geographies,)
 
 
+# ===  RETURN THE VIEW FOR RENDERING ===
+
+
 @app.cell
 def _(
     geographies,
@@ -200,11 +304,19 @@ def _(
     MAX_COMPARISON_GEOGRAPHIES,
     processed,
 ):
+    """Compute the comparison and build the renderer-facing view.
+
+    Depends on the current `indicator` and `geographies` selections plus
+    `processed`, so it recomputes whenever either changes.
+     `get_comparison` raises if the indicator/geographies pair has no observations.
+
+    Returns `view`.
+    """
     # Clamp the selection before querying.
-    # The multiselect default does not  always survive WASM export:
+    # The multiselect default does not always survive WASM export:
     # on first paint the hydrated value can arrive
-    # as the full option set, and max selections
-    # only limits *new* user picks,
+    # as the full option set, and max_selections
+    # only limits new user picks,
     # not an oversized initial value.
     # Bounding here guarantees the renderer never receives
     # more series than the chart can hold, online or local.
@@ -221,6 +333,9 @@ def _(
     return (view,)
 
 
+# === DISPLAY THE RENDERED CHART(S) ===
+
+
 @app.cell
 def _(
     geographies,
@@ -232,6 +347,22 @@ def _(
     renderer,
     view,
 ):
+    """Render `view` with one renderer, or all three stacked in Compare mode.
+
+    Depends on `view` (the data), and on `mode`/`renderer` (the user's display
+    choices).
+    This cell is meant to rerun on those toggles:
+    it consumes the controls, it does not create them, so
+    rerunning re-renders without resetting anything.
+
+    Altair is returned via `mo.as_html`, not `mo.ui.altair_chart`,
+    because the interactive wrapper
+    over-serializes under WASM (it will send a LOT of data)
+    and can blow past marimo's output-size limit.
+
+    Returns nothing; its last expression displays the chart.
+    """
+
     def render_one(name):
         if name == "Altair":
             chart = make_altair_compare(view)
@@ -270,10 +401,13 @@ def _(
     return
 
 
+# ===  TYPICALLY END WITH A MARKDOWN SOURCE LINK AND CLOSING ===
+
+
 @app.cell
 def _(mo):
-    mo.md(
-        """
+    """Render the closing suggestions and source link. Depends only on `mo`."""
+    mo.md("""
         ## Suggestions
 
         - **Improve `s01`.** Processing is deliberately minimal.
@@ -286,8 +420,7 @@ def _(mo):
           or other available geographies.
 
         [Source](https://github.com/civic-interconnect/compare-tracr)
-        """
-    )
+        """)
 
 
 if __name__ == "__main__":
